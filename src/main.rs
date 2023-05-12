@@ -6,7 +6,7 @@ use superviseur::{
         config::execute_config,
         init::execute_init,
         list::execute_list,
-        log::execute_log,
+        log::{execute_log, execute_search_log},
         new::execute_new,
         preview::execute_preview,
         project::{execute_get_project, execute_list_projects},
@@ -98,7 +98,9 @@ A simple process supervisor"#,
                 .about("Start the superviseur server"),
         )
         .subcommand(Command::new("daemon").about("Start the superviseur daemon"))
-        .subcommand(Command::new("up").about("Start all services"))
+        .subcommand(Command::new("up")
+        .arg(arg!(--build "Build all services before starting"))
+        .about("Start all services"))
         .subcommand(Command::new("down").about("Stop all services"))
         .subcommand(Command::new("ui").about("Start the superviseur dashboard"))
         .subcommand(Command::new("build")
@@ -119,9 +121,15 @@ A simple process supervisor"#,
             .about("Manage projects")
         )
         .subcommand(
-            Command::new("preview")
+            Command::new("open")
                 .arg(arg!(<name> "The name of the service to preview"))
                 .about("Open URL of a service in the browser"),   
+        )
+        .subcommand(
+            Command::new("search-log")
+                .arg(arg!(<name> "The name of the service to search the log of"))
+                .arg(arg!(<query> "The query to search"))
+                .about("Search the log of a service"),
         )
 }
 
@@ -132,7 +140,8 @@ async fn main() -> Result<(), Error> {
     match matches.subcommand() {
         Some(("start", args)) => {
             let name = args.value_of("name");
-            execute_start(name).await?;
+            let build = args.is_present("build");
+            execute_start(name, build).await?;
         }
         Some(("stop", args)) => {
             let name = args.value_of("name");
@@ -178,7 +187,10 @@ async fn main() -> Result<(), Error> {
             server::exec(port, true).await?;
         }
         Some(("daemon", _)) => server::exec(5476, false).await?,
-        Some(("up", _)) => execute_start(None).await?,
+        Some(("up", args)) => {
+            let build = args.is_present("build");
+            execute_start(None, build).await?
+        }
         Some(("down", _)) => execute_stop(None).await?,
         Some(("ui", _)) => execute_ui().await?,
         Some(("build", args)) => {
@@ -196,6 +208,11 @@ async fn main() -> Result<(), Error> {
         Some(("preview", args)) => {
             let name = args.value_of("name");
             execute_preview(name.unwrap()).await?;
+        }
+        Some(("search-log", args)) => {
+            let name = args.value_of("name");
+            let query = args.value_of("query");
+            execute_search_log(name.unwrap(), query.unwrap()).await?;
         }
         _ => cli().print_help()?,
     }

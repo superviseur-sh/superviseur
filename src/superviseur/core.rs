@@ -29,7 +29,11 @@ use crate::{
     },
 };
 
-use super::{dependencies::DependencyGraph, watch::WatchForChanges};
+use super::{
+    dependencies::{DependencyGraph, GraphCommand},
+    logs::LogEngine,
+    watch::WatchForChanges,
+};
 
 #[derive(Clone)]
 pub struct Superviseur {}
@@ -44,6 +48,7 @@ impl Superviseur {
         config_map: Arc<Mutex<HashMap<String, ConfigurationData>>>,
         service_graph: Arc<Mutex<Vec<(DependencyGraph, String)>>>,
         service_map: Arc<Mutex<Vec<(HashMap<usize, Service>, String)>>>,
+        log_engine: LogEngine,
     ) -> Self {
         let childs = Arc::new(Mutex::new(HashMap::new()));
         thread::spawn(move || {
@@ -57,6 +62,7 @@ impl Superviseur {
                 config_map,
                 service_graph,
                 service_map,
+                log_engine,
             );
             futures::executor::block_on(internal);
         });
@@ -67,14 +73,14 @@ impl Superviseur {
 #[derive(Debug)]
 pub enum SuperviseurCommand {
     Load(Service, String),
-    Start(Service, String),
+    Start(Service, String, bool),
     Stop(Service, String),
     Restart(Service, String),
     Build(Service, String),
     LoadConfig(ConfigurationData, String),
     WatchForChanges(String, Service, String),
     StartDependency(Service, String),
-    StartAll(String),
+    StartAll(String, bool),
     StopAll(String),
     RestartAll(String),
     BuildAll(String),
@@ -105,6 +111,7 @@ struct SuperviseurInternal {
     config_map: Arc<Mutex<Vec<(ConfigurationData, String)>>>,
     service_graph: Arc<Mutex<Vec<(DependencyGraph, String)>>>,
     service_map: Arc<Mutex<Vec<(HashMap<usize, Service>, String)>>>,
+    log_engine: LogEngine,
 }
 
 impl SuperviseurInternal {
@@ -118,6 +125,7 @@ impl SuperviseurInternal {
         config_map: Arc<Mutex<HashMap<String, ConfigurationData>>>,
         service_graph: Arc<Mutex<Vec<(DependencyGraph, String)>>>,
         service_map: Arc<Mutex<Vec<(HashMap<usize, Service>, String)>>>,
+        log_engine: LogEngine,
     ) -> Self {
         let config_map = Arc::new(Mutex::new(
             config_map
@@ -137,6 +145,7 @@ impl SuperviseurInternal {
             config_map,
             service_graph,
             service_map,
+            log_engine,
         }
     }
 
@@ -150,7 +159,13 @@ impl SuperviseurInternal {
         config_map.push((cfg.clone(), project.clone()));
 
         let mut services = HashMap::new();
-        let mut graph = DependencyGraph::new(project.clone());
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let mut graph = DependencyGraph::new(
+            project.clone(),
+            cfg.context.unwrap(),
+            cmd_tx,
+            Arc::new(Mutex::new(cmd_rx)),
+        );
         for (key, mut service) in cfg.services.clone().into_iter() {
             service.name = key.clone();
             services.insert(
@@ -159,9 +174,20 @@ impl SuperviseurInternal {
                     self.processes.clone(),
                     self.childs.clone(),
                     self.event_tx.clone(),
+                    self.log_engine.clone(),
                 ),
                 service.clone(),
             );
+            graph
+                .cmd_tx
+                .send(GraphCommand::AddVertex(
+                    service,
+                    self.processes.clone(),
+                    self.childs.clone(),
+                    self.event_tx.clone(),
+                    self.log_engine.clone(),
+                ))
+                .unwrap();
         }
 
         // Add edges to the graph
@@ -176,7 +202,10 @@ impl SuperviseurInternal {
                     .iter()
                     .find(|(_, s)| s.name == *dep)
                     .map(|(id, _)| *id)
-                    .map(|to| graph.add_edge(from, to));
+                    .map(|to| {
+                        graph.add_edge(from, to);
+                        graph.cmd_tx.send(GraphCommand::AddEdge(from, to)).unwrap();
+                    });
             }
         }
 
@@ -242,7 +271,12 @@ impl SuperviseurInternal {
         Ok(())
     }
 
-    fn handle_start(&mut self, service: Service, project: String) -> Result<(), Error> {
+    fn handle_start(
+        &mut self,
+        service: Service,
+        project: String,
+        build: bool,
+    ) -> Result<(), Error> {
         self.event_tx
             .send(ProcessEvent::Starting(
                 service.name.clone(),
@@ -258,8 +292,10 @@ impl SuperviseurInternal {
             .map(|(s, _)| s)
             .next()
             .ok_or(anyhow::anyhow!("Project {} not found", project))?;
-        let mut visited = vec![false; graph.size()];
-        graph.start_service(&service, &mut visited);
+        graph
+            .cmd_tx
+            .send(GraphCommand::StartService(service, build))
+            .unwrap();
         Ok(())
     }
 
@@ -279,14 +315,18 @@ impl SuperviseurInternal {
             .map(|(s, _)| s)
             .next()
             .ok_or(anyhow::anyhow!("Project {} not found", project))?;
-        let mut visited = vec![false; graph.size()];
-        graph.stop_service(&service, &mut visited);
+        // let mut visited = vec![false; graph.size()];
+        // graph.stop_service(&service, &mut visited);
+        graph
+            .cmd_tx
+            .send(GraphCommand::StopService(service))
+            .unwrap();
         Ok(())
     }
 
     fn handle_restart(&mut self, service: Service, project: String) -> Result<(), Error> {
         self.handle_stop(service.clone(), project.clone())?;
-        self.handle_start(service.clone(), project.clone())?;
+        self.handle_start(service.clone(), project.clone(), false)?;
         Ok(())
     }
 
@@ -306,8 +346,10 @@ impl SuperviseurInternal {
             .map(|(s, _)| s)
             .next()
             .ok_or(anyhow::anyhow!("Project {} not found", project))?;
-        let mut visited = vec![false; graph.size()];
-        graph.build_service(&service, &mut visited);
+        graph
+            .cmd_tx
+            .send(GraphCommand::BuildService(service))
+            .unwrap();
         Ok(())
     }
 
@@ -327,7 +369,7 @@ impl SuperviseurInternal {
         Ok(())
     }
 
-    fn handle_start_all(&mut self, project: String) -> Result<(), Error> {
+    fn handle_start_all(&mut self, project: String, build: bool) -> Result<(), Error> {
         let service_graph = self.service_graph.lock().unwrap();
         let graph = service_graph
             .clone()
@@ -336,7 +378,10 @@ impl SuperviseurInternal {
             .map(|(s, _)| s)
             .next()
             .ok_or(anyhow::anyhow!("Project {} not found", project))?;
-        graph.start_services();
+        graph
+            .cmd_tx
+            .send(GraphCommand::StartServices(build))
+            .unwrap();
         let services = self.get_project_services(&project)?;
         SimpleBroker::publish(AllServicesStarted { payload: services });
         Ok(())
@@ -351,13 +396,13 @@ impl SuperviseurInternal {
             .map(|(s, _)| s)
             .next()
             .ok_or(anyhow::anyhow!("Project {} not found", project))?;
-        graph.stop_services();
+        graph.cmd_tx.send(GraphCommand::StopServices).unwrap();
         Ok(())
     }
 
     fn handle_restart_all(&mut self, project: String) -> Result<(), Error> {
         self.handle_stop_all(project.clone())?;
-        self.handle_start_all(project)?;
+        self.handle_start_all(project, false)?;
         Ok(())
     }
 
@@ -370,14 +415,16 @@ impl SuperviseurInternal {
             .map(|(s, _)| s)
             .next()
             .ok_or(anyhow::anyhow!("Project {} not found", project))?;
-        graph.build_services();
+        graph.cmd_tx.send(GraphCommand::BuildServices).unwrap();
         Ok(())
     }
 
     fn handle_command(&mut self, cmd: SuperviseurCommand) -> Result<(), Error> {
         match cmd {
             SuperviseurCommand::Load(service, project) => self.handle_load(service, project),
-            SuperviseurCommand::Start(service, project) => self.handle_start(service, project),
+            SuperviseurCommand::Start(service, project, build) => {
+                self.handle_start(service, project, build)
+            }
             SuperviseurCommand::Stop(service, project) => self.handle_stop(service, project),
             SuperviseurCommand::Restart(service, project) => self.handle_restart(service, project),
             SuperviseurCommand::LoadConfig(config, project) => {
@@ -387,7 +434,7 @@ impl SuperviseurInternal {
                 self.handle_watch_for_changes(dir, service, project)
             }
             SuperviseurCommand::StartDependency(_, _) => Ok(()),
-            SuperviseurCommand::StartAll(project) => self.handle_start_all(project),
+            SuperviseurCommand::StartAll(project, build) => self.handle_start_all(project, build),
             SuperviseurCommand::StopAll(project) => self.handle_stop_all(project),
             SuperviseurCommand::RestartAll(project) => self.handle_restart_all(project),
             SuperviseurCommand::Build(service, project) => self.handle_build(service, project),
