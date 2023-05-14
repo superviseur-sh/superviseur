@@ -1,14 +1,14 @@
 [package]
 authors = ["Tsiry Sandratraina <tsiry.sndr@aol.com>"]
 categories = ["command-line-utilities"]
-description = "A simple process supervisor (a single binary with zero dependencies) written in Rust."
+description = "Define and run multi-service applications on isolated environments with Nix or Docker"
 edition = "2021"
-keywords = ["process", "supervisor", "cli"]
+keywords = ["compose", "supervisor", "cli", "docker", "nix"]
 license = "MPL-2.0"
 name = "superviseur"
 readme = "README.md"
 repository = "https://github.com/tsirysndr/superviseur"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.9"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -33,6 +33,7 @@ hcl-rs = "0.12.3"
 indexmap = {version = "1.9.2", features = ["serde"]}
 inquire = "0.6.2"
 local-ip-addr = "0.1.1"
+md5 = "0.7.0"
 mime_guess = "2.0.4"
 names = "0.14.0"
 nix = "0.26.2"
@@ -45,7 +46,7 @@ rust-embed = {version = "6.6.0", features = ["debug-embed", "actix"]}
 serde = "1.0.152"
 serde_json = "1.0.96"
 sha256 = "1.1.2"
-shiplift = "0.7.0"
+shiplift = {version = "0.7.0", features = ["vendored-ssl"]}
 slab = "0.4.8"
 spinners = "4.1.0"
 sysinfo = "0.28.1"

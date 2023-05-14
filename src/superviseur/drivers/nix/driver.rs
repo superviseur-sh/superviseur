@@ -9,7 +9,6 @@ use std::{
 use anyhow::Error;
 use async_trait::async_trait;
 use owo_colors::OwoColorize;
-use spinners::{Spinner, Spinners};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -22,10 +21,7 @@ use crate::{
         drivers::DriverPlugin,
         logs::{Log, LogEngine},
     },
-    types::{
-        configuration::{DriverConfig, Service},
-        process::Process,
-    },
+    types::{configuration::Service, process::Process},
 };
 
 use nix::{
@@ -76,30 +72,6 @@ impl Driver {
         }
     }
 
-    pub fn setup_flox_env(&self, cfg: &DriverConfig) -> Result<(), Error> {
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg("flox --version")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("flox is not installed, see https://floxdev.com/docs/");
-
-        let command = format!(
-            "flox print-dev-env -A {}",
-            cfg.environment.clone().unwrap().replace(".#", "")
-        );
-        let child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-
-        child.wait_with_output()?;
-        Ok(())
-    }
-
     pub fn write_logs(&self, stdout: ChildStdout, stderr: ChildStderr) {
         let cloned_service = self.service.clone();
         let log_engine = self.log_engine.clone();
@@ -123,7 +95,6 @@ impl Driver {
                     output: String::from("stdout"),
                     date: tantivy::DateTime::from_timestamp_secs(chrono::Local::now().timestamp()),
                 };
-
                 let log_engine = log_engine.lock().unwrap();
                 match log_engine.insert(&log) {
                     Ok(_) => {}
@@ -175,32 +146,7 @@ impl Driver {
 #[async_trait]
 impl DriverPlugin for Driver {
     async fn start(&self, project: String) -> Result<(), Error> {
-        let cfg = self
-            .service
-            .r#use
-            .as_ref()
-            .unwrap()
-            .into_iter()
-            .find(|(driver, _)| *driver == "flox")
-            .map(|(_, x)| x)
-            .unwrap();
-        let message = format!(
-            "Setup flox environment {} ...",
-            cfg.environment.clone().unwrap().bright_green()
-        );
-        let mut sp = Spinner::new(Spinners::Line, message.into());
-        if self.setup_flox_env(&cfg).is_err() {
-            println!("There is an error with flox env");
-            return Ok(());
-        }
-        sp.stop();
-        println!("\nSetup flox env done !");
-
-        let command = format!(
-            "flox activate -e {} -- {}",
-            cfg.environment.clone().unwrap(),
-            &self.service.command
-        );
+        let command = format!("nix develop --command -- {}", &self.service.command);
         println!("command: {}", command);
 
         let envs = self.service.env.clone();
@@ -244,21 +190,8 @@ impl DriverPlugin for Driver {
         if let Some(stop_command) = self.service.stop_command.clone() {
             let envs = self.service.env.clone();
             let working_dir = self.service.working_dir.clone();
-            let cfg = self
-                .service
-                .r#use
-                .as_ref()
-                .unwrap()
-                .into_iter()
-                .find(|(driver, _)| *driver == "flox")
-                .map(|(_, x)| x)
-                .unwrap();
 
-            let stop_command = format!(
-                "flox activate -e {} -- {}",
-                cfg.environment.clone().unwrap(),
-                stop_command
-            );
+            let stop_command = format!("nix develop --command -- {}", stop_command);
             let mut child = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(stop_command)
@@ -336,22 +269,8 @@ impl DriverPlugin for Driver {
         if let Some(build) = self.service.build.clone() {
             let envs = self.service.env.clone();
             let working_dir = self.service.working_dir.clone();
-            let cfg = self
-                .service
-                .r#use
-                .as_ref()
-                .unwrap()
-                .into_iter()
-                .find(|(driver, _)| *driver == "flox")
-                .map(|(_, x)| x)
-                .unwrap();
-            self.setup_flox_env(&cfg)?;
 
-            let build_command = format!(
-                "flox activate -e {} -- {}",
-                cfg.environment.clone().unwrap(),
-                build.command
-            );
+            let build_command = format!("nix develop --command -- {}", build.command);
             println!("build_command: {}", build_command);
             let mut child = std::process::Command::new("sh")
                 .arg("-c")

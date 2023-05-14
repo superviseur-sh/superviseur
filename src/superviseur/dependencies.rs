@@ -12,7 +12,7 @@ use crate::types::{configuration::Service, process::Process};
 
 use super::{
     core::ProcessEvent,
-    drivers::{docker, exec, flox, DriverPlugin},
+    drivers::{docker, exec, flox, nix, DriverPlugin},
     logs::LogEngine,
 };
 
@@ -103,7 +103,7 @@ pub enum GraphCommand {
         Arc<Mutex<Vec<(Process, String)>>>,
         Arc<Mutex<HashMap<String, i32>>>,
         mpsc::UnboundedSender<ProcessEvent>,
-        LogEngine,
+        Arc<Mutex<LogEngine>>,
     ),
     AddEdge(usize, usize),
     StartService(Service, bool),
@@ -200,7 +200,7 @@ impl DependencyGraph {
         processes: Arc<Mutex<Vec<(Process, String)>>>,
         childs: Arc<Mutex<HashMap<String, i32>>>,
         event_tx: mpsc::UnboundedSender<ProcessEvent>,
-        log_engine: LogEngine,
+        log_engine: Arc<Mutex<LogEngine>>,
     ) -> usize {
         let mut vertex = Vertex::from(service);
 
@@ -228,10 +228,26 @@ impl DependencyGraph {
                     log_engine.clone(),
                 ));
             }
-            if r#use.into_iter().any(|(driver, _)| driver == "docker") {
+
+            if r#use
+                .clone()
+                .into_iter()
+                .any(|(driver, _)| driver == "docker")
+            {
                 vertex.driver = Box::new(docker::driver::Driver::new(
                     self.project.clone(),
                     self.context.clone(),
+                    service,
+                    processes.clone(),
+                    event_tx.clone(),
+                    childs.clone(),
+                    log_engine.clone(),
+                ));
+            }
+
+            if r#use.into_iter().any(|(driver, _)| driver == "nix") {
+                vertex.driver = Box::new(nix::driver::Driver::new(
+                    self.project.clone(),
                     service,
                     processes,
                     event_tx,

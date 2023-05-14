@@ -35,7 +35,7 @@ fn cli() -> Command<'static> {
       /____/\__,_/ .___/\___/_/    |___/_/____/\___/\__,_/_/     
                 /_/                                              
       
-A simple process supervisor"#,
+ Define and run multi-service applications on isolated environments with Nix or Docker"#,
         )
         .subcommand(
             Command::new("start")
@@ -204,7 +204,7 @@ async fn main() -> Result<(), Error> {
             Some(("list", _)) => execute_list_projects().await?,
             _ => SubCommand::with_name("project").print_help()?,
         },
-        Some(("preview", args)) => {
+        Some(("open", args)) => {
             let name = args.value_of("name");
             execute_preview(name.unwrap()).await?;
         }
