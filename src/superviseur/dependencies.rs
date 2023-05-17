@@ -4,17 +4,18 @@ use std::{
     thread,
 };
 
+use anyhow::Error;
 use async_recursion::async_recursion;
 use dyn_clone::clone_trait_object;
 use tokio::sync::mpsc;
 
 use super::{
     core::ProcessEvent,
-    drivers::{devbox, devenv, docker, exec, flox, nix, DriverPlugin},
+    drivers::{devbox, devenv, docker, exec, flox, nix, wasm, DriverPlugin},
     logs::LogEngine,
     macros::{check_driver, create_driver},
 };
-use crate::types::{configuration::Service, process::Process};
+use crate::types::{configuration::Service, events::SuperviseurEvent, process::Process};
 
 clone_trait_object!(DriverPlugin);
 
@@ -104,6 +105,7 @@ pub enum GraphCommand {
         Arc<Mutex<HashMap<String, i32>>>,
         mpsc::UnboundedSender<ProcessEvent>,
         Arc<Mutex<LogEngine>>,
+        mpsc::UnboundedSender<SuperviseurEvent>,
     ),
     AddEdge(usize, usize),
     StartService(Service, bool),
@@ -121,6 +123,7 @@ pub struct DependencyGraph {
     project: String,
     context: String,
     pub cmd_tx: mpsc::UnboundedSender<GraphCommand>,
+    superviseur_event: mpsc::UnboundedSender<SuperviseurEvent>,
 }
 
 impl DependencyGraph {
@@ -129,6 +132,7 @@ impl DependencyGraph {
         context: String,
         cmd_tx: mpsc::UnboundedSender<GraphCommand>,
         cmd_rx: Arc<Mutex<mpsc::UnboundedReceiver<GraphCommand>>>,
+        superviseur_event: mpsc::UnboundedSender<SuperviseurEvent>,
     ) -> Self {
         let graph = Self {
             vertices: Vec::new(),
@@ -136,6 +140,7 @@ impl DependencyGraph {
             project,
             context,
             cmd_tx,
+            superviseur_event,
         };
         let mut cloned_graph = graph.clone();
         thread::spawn(move || {
@@ -151,9 +156,19 @@ impl DependencyGraph {
                             childs,
                             event_tx,
                             log_engine,
+                            superviseur_event_tx,
                         ) => {
-                            cloned_graph
-                                .add_vertex(&service, processes, childs, event_tx, log_engine);
+                            match cloned_graph.add_vertex(
+                                &service,
+                                processes,
+                                childs,
+                                event_tx,
+                                log_engine,
+                                superviseur_event_tx,
+                            ) {
+                                Ok(_) => {}
+                                Err(_) => {}
+                            }
                         }
                         GraphCommand::AddEdge(from, to) => {
                             cloned_graph.add_edge(from, to);
@@ -201,7 +216,8 @@ impl DependencyGraph {
         childs: Arc<Mutex<HashMap<String, i32>>>,
         event_tx: mpsc::UnboundedSender<ProcessEvent>,
         log_engine: Arc<Mutex<LogEngine>>,
-    ) -> usize {
+        superviseur_event: mpsc::UnboundedSender<SuperviseurEvent>,
+    ) -> Result<usize, Error> {
         let mut vertex = Vertex::from(service);
         let project = self.project.clone();
 
@@ -212,7 +228,8 @@ impl DependencyGraph {
             processes,
             event_tx,
             childs,
-            log_engine
+            log_engine,
+            superviseur_event
         );
 
         if let Some(r#use) = service.r#use.clone() {
@@ -224,7 +241,8 @@ impl DependencyGraph {
                     processes,
                     event_tx,
                     childs,
-                    log_engine
+                    log_engine,
+                    superviseur_event
                 );
             }
 
@@ -237,7 +255,8 @@ impl DependencyGraph {
                     event_tx.clone(),
                     childs.clone(),
                     log_engine.clone(),
-                ));
+                    superviseur_event.clone(),
+                )?);
             }
 
             if check_driver!(r#use, "nix") {
@@ -248,7 +267,8 @@ impl DependencyGraph {
                     processes,
                     event_tx,
                     childs,
-                    log_engine
+                    log_engine,
+                    superviseur_event
                 );
             }
 
@@ -260,7 +280,8 @@ impl DependencyGraph {
                     processes,
                     event_tx,
                     childs,
-                    log_engine
+                    log_engine,
+                    superviseur_event
                 );
             }
 
@@ -272,12 +293,26 @@ impl DependencyGraph {
                     processes,
                     event_tx,
                     childs,
-                    log_engine
+                    log_engine,
+                    superviseur_event
+                );
+            }
+
+            if check_driver!(r#use, "wasm") {
+                vertex.driver = create_driver!(
+                    wasm::driver::Driver::new,
+                    project,
+                    service,
+                    processes,
+                    event_tx,
+                    childs,
+                    log_engine,
+                    superviseur_event
                 );
             }
         }
         self.vertices.push(vertex);
-        self.vertices.len() - 1
+        Ok(self.vertices.len() - 1)
     }
 
     pub fn add_edge(&mut self, from: usize, to: usize) {
@@ -289,6 +324,9 @@ impl DependencyGraph {
         for vertex in self.vertices.clone().into_iter() {
             self.start_service(&vertex.into(), &mut visited).await;
         }
+        self.superviseur_event
+            .send(SuperviseurEvent::AllServicesStarted(self.project.clone()))
+            .unwrap();
     }
 
     #[async_recursion(?Send)]
@@ -315,11 +353,27 @@ impl DependencyGraph {
         }
 
         println!("Starting service {}", self.vertices[index].name);
-        self.vertices[index]
+
+        self.superviseur_event
+            .send(SuperviseurEvent::Starting(
+                self.project.clone(),
+                self.vertices[index].name.clone(),
+            ))
+            .unwrap();
+
+        if let Err(e) = self.vertices[index]
             .driver
             .start(self.project.clone())
             .await
-            .unwrap();
+        {
+            self.superviseur_event
+                .send(SuperviseurEvent::Error(
+                    self.project.clone(),
+                    self.vertices[index].name.clone(),
+                    e.to_string(),
+                ))
+                .unwrap();
+        }
     }
 
     pub async fn stop_services(&self) {
@@ -327,6 +381,9 @@ impl DependencyGraph {
         for vertex in self.vertices.clone().into_iter() {
             self.stop_service(&vertex.into(), &mut visited).await;
         }
+        self.superviseur_event
+            .send(SuperviseurEvent::AllServicesStopped(self.project.clone()))
+            .unwrap();
     }
 
     #[async_recursion(?Send)]
@@ -346,11 +403,22 @@ impl DependencyGraph {
         }
 
         println!("Stopping service {}", self.vertices[index].name);
-        self.vertices[index]
-            .driver
-            .stop(self.project.clone())
-            .await
+        self.superviseur_event
+            .send(SuperviseurEvent::Stopping(
+                self.project.clone(),
+                self.vertices[index].name.clone(),
+            ))
             .unwrap();
+
+        if let Err(e) = self.vertices[index].driver.stop(self.project.clone()).await {
+            self.superviseur_event
+                .send(SuperviseurEvent::Error(
+                    self.project.clone(),
+                    self.vertices[index].name.clone(),
+                    format!("Failed to stop service: {}", e.to_string()),
+                ))
+                .unwrap();
+        }
     }
 
     pub async fn build_services(&self) {
@@ -358,6 +426,9 @@ impl DependencyGraph {
         for vertex in self.vertices.clone().into_iter() {
             self.build_service(&vertex.into(), &mut visited).await;
         }
+        self.superviseur_event
+            .send(SuperviseurEvent::AllServicesBuilt(self.project.clone()))
+            .unwrap();
     }
 
     #[async_recursion(?Send)]
@@ -377,10 +448,25 @@ impl DependencyGraph {
         }
 
         println!("Building service {}", self.vertices[index].name);
-        self.vertices[index]
+
+        self.superviseur_event
+            .send(SuperviseurEvent::Building(
+                self.project.clone(),
+                self.vertices[index].name.clone(),
+            ))
+            .unwrap();
+        if let Err(e) = self.vertices[index]
             .driver
             .build(self.project.clone())
             .await
-            .unwrap();
+        {
+            self.superviseur_event
+                .send(SuperviseurEvent::Error(
+                    self.project.clone(),
+                    self.vertices[index].name.clone(),
+                    format!("Failed to build service: {}", e.to_string()),
+                ))
+                .unwrap();
+        }
     }
 }

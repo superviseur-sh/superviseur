@@ -7,16 +7,27 @@ use std::{
 
 use crate::{
     api::superviseur::v1alpha1::{
-        logging_service_server::LoggingService, LogDetails, LogRequest, LogResponse, SearchRequest,
-        SearchResponse, TailRequest, TailResponse,
+        logging_service_server::LoggingService, EventsRequest, EventsResponse, LogDetails,
+        LogRequest, LogResponse, SearchRequest, SearchResponse, TailRequest, TailResponse,
     },
     superviseur::{core::Superviseur, logs::LogEngine},
-    types::{configuration::ConfigurationData, process::Process},
+    types::{
+        configuration::ConfigurationData,
+        events::{
+            SuperviseurEvent, ALL_SERVICES_BUILT, ALL_SERVICES_RESTARTED, ALL_SERVICES_STARTED,
+            ALL_SERVICES_STOPPED, SERVICE_BUILDING, SERVICE_BUILT, SERVICE_CRASHED, SERVICE_ERROR,
+            SERVICE_LOGS, SERVICE_RESTARTED, SERVICE_RESTARTING, SERVICE_SETUP_ENV,
+            SERVICE_STARTED, SERVICE_STARTING, SERVICE_STOPPED, SERVICE_STOPPING,
+        },
+        process::Process,
+    },
 };
 use anyhow::Error;
 use chrono::{TimeZone, Utc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
+
+use super::return_event;
 
 pub struct Logging {
     superviseur: Superviseur,
@@ -24,6 +35,8 @@ pub struct Logging {
     config_map: Arc<Mutex<HashMap<String, ConfigurationData>>>,
     project_map: Arc<Mutex<HashMap<String, String>>>,
     log_engine: Arc<Mutex<LogEngine>>,
+    superviseur_events_rx:
+        Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<SuperviseurEvent>>>,
 }
 
 impl Logging {
@@ -33,6 +46,9 @@ impl Logging {
         config_map: Arc<Mutex<HashMap<String, ConfigurationData>>>,
         project_map: Arc<Mutex<HashMap<String, String>>>,
         log_engine: Arc<Mutex<LogEngine>>,
+        superviseur_events_rx: Arc<
+            tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<SuperviseurEvent>>,
+        >,
     ) -> Self {
         Self {
             superviseur,
@@ -40,6 +56,7 @@ impl Logging {
             config_map,
             project_map,
             log_engine,
+            superviseur_events_rx,
         }
     }
 
@@ -56,6 +73,7 @@ impl Logging {
 impl LoggingService for Logging {
     type TailStream = ReceiverStream<Result<TailResponse, Status>>;
     type LogStream = ReceiverStream<Result<LogResponse, Status>>;
+    type EventsStream = ReceiverStream<Result<EventsResponse, Status>>;
 
     async fn log(&self, request: Request<LogRequest>) -> Result<Response<Self::LogStream>, Status> {
         let request = request.into_inner();
@@ -242,5 +260,192 @@ impl LoggingService for Logging {
                 .collect(),
         };
         Ok(Response::new(response))
+    }
+
+    async fn events(
+        &self,
+        request: Request<EventsRequest>,
+    ) -> Result<Response<Self::EventsStream>, Status> {
+        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+        let events_rx = Arc::clone(&self.superviseur_events_rx);
+        let request = request.into_inner();
+        let path = request.config_file_path;
+        let service_name = request.service;
+
+        let project_id = self
+            .get_project_id(path.clone())
+            .map_err(|e| tonic::Status::not_found(e.to_string()))?;
+        let config_map = self.config_map.lock().unwrap();
+
+        if !config_map.contains_key(&project_id) {
+            return Err(tonic::Status::not_found("Config file not found"));
+        }
+
+        tokio::spawn(async move {
+            loop {
+                let mut events_rx = events_rx.lock().await;
+                let tx = tx.clone();
+
+                match events_rx.recv().await {
+                    Some(SuperviseurEvent::Starting(project, service)) => {
+                        return_event!(
+                            tx,
+                            service_name,
+                            SERVICE_STARTING,
+                            project,
+                            service,
+                            "".into()
+                        )
+                    }
+
+                    Some(SuperviseurEvent::Stopping(project, service)) => {
+                        return_event!(
+                            tx,
+                            service_name,
+                            SERVICE_STOPPING,
+                            project,
+                            service,
+                            "".into()
+                        )
+                    }
+
+                    Some(SuperviseurEvent::Restarting(project, service)) => {
+                        return_event!(
+                            tx,
+                            service_name,
+                            SERVICE_RESTARTING,
+                            project,
+                            service,
+                            "".into()
+                        )
+                    }
+
+                    Some(SuperviseurEvent::Building(project, service)) => {
+                        return_event!(
+                            tx,
+                            service_name,
+                            SERVICE_BUILDING,
+                            project,
+                            service,
+                            "".into()
+                        )
+                    }
+
+                    Some(SuperviseurEvent::SetupEnv(project, service, output)) => return_event!(
+                        tx,
+                        service_name,
+                        SERVICE_SETUP_ENV,
+                        project,
+                        service,
+                        output
+                    ),
+
+                    Some(SuperviseurEvent::Started(project, service)) => {
+                        return_event!(
+                            tx,
+                            service_name,
+                            SERVICE_STARTED,
+                            project,
+                            service,
+                            "".into()
+                        )
+                    }
+                    Some(SuperviseurEvent::Stopped(project, service)) => {
+                        return_event!(
+                            tx,
+                            service_name,
+                            SERVICE_STOPPED,
+                            project,
+                            service,
+                            "".into()
+                        )
+                    }
+
+                    Some(SuperviseurEvent::Restarted(project, service)) => {
+                        return_event!(
+                            tx,
+                            service_name,
+                            SERVICE_RESTARTED,
+                            project,
+                            service,
+                            "".into()
+                        )
+                    }
+
+                    Some(SuperviseurEvent::Built(project, service)) => {
+                        return_event!(tx, service_name, SERVICE_BUILT, project, service, "".into())
+                    }
+
+                    Some(SuperviseurEvent::Logs(project, service, output)) => {
+                        return_event!(tx, service_name, SERVICE_LOGS, project, service, output)
+                    }
+
+                    Some(SuperviseurEvent::Error(project, service, output)) => {
+                        return_event!(tx, service_name, SERVICE_ERROR, project, service, output)
+                    }
+
+                    Some(SuperviseurEvent::Crashed(project, service)) => {
+                        return_event!(
+                            tx,
+                            service_name,
+                            SERVICE_CRASHED,
+                            project,
+                            service,
+                            "".into()
+                        )
+                    }
+
+                    Some(SuperviseurEvent::AllServicesStarted(project)) => {
+                        tx.send(Ok(EventsResponse {
+                            event: ALL_SERVICES_STARTED.to_string(),
+                            project,
+                            date: chrono::Utc::now().to_rfc3339(),
+                            ..Default::default()
+                        }))
+                        .await
+                        .unwrap();
+                    }
+
+                    Some(SuperviseurEvent::AllServicesStopped(project)) => {
+                        tx.send(Ok(EventsResponse {
+                            event: ALL_SERVICES_STOPPED.to_string(),
+                            project,
+                            date: chrono::Utc::now().to_rfc3339(),
+                            ..Default::default()
+                        }))
+                        .await
+                        .unwrap();
+                    }
+
+                    Some(SuperviseurEvent::AllServicesRestarted(project)) => {
+                        tx.send(Ok(EventsResponse {
+                            event: ALL_SERVICES_RESTARTED.to_string(),
+                            project,
+                            date: chrono::Utc::now().to_rfc3339(),
+                            ..Default::default()
+                        }))
+                        .await
+                        .unwrap();
+                    }
+
+                    Some(SuperviseurEvent::AllServicesBuilt(project)) => {
+                        tx.send(Ok(EventsResponse {
+                            event: ALL_SERVICES_BUILT.to_string(),
+                            project,
+                            date: chrono::Utc::now().to_rfc3339(),
+                            ..Default::default()
+                        }))
+                        .await
+                        .unwrap();
+                    }
+
+                    None => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }

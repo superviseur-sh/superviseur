@@ -15,11 +15,11 @@
   <a href="https://feat-webui--640724a8e12e5a011d6d59fb.chromatic.com" target="_blank">
   <img src="https://img.shields.io/badge/Storybook-FF4785?logo=storybook&logoColor=fff" />
   </a>
-  <a href="https://github.com/tsirysndr/superviseur/tree/master/webui" target="_blank">
-  <img src="https://img.shields.io/badge/-ApolloGraphQL-311C87?logo=apollo-graphql" />
-  </a>
   <a href="https://github.com/tsirysndr/superviseur/actions/workflows/release.yml" target="_blank">
     <img alt="release" src="https://github.com/tsirysndr/superviseur/actions/workflows/release.yml/badge.svg" />
+  </a>
+  <a href="https://discord.gg/FeGJerUC" target="_blank">
+    <img alt="discord-server" src="https://img.shields.io/discord/1026789060515205181?label=discord&logo=discord&color=5865F2">
   </a>
 </p>
 
@@ -54,8 +54,8 @@ brew install tsirysndr/tap/superviseur
 Or download the latest release for your platform [here](https://github.com/tsirysndr/superviseur/releases).
 
 ## 📦 Downloads
-- `Mac`: arm64: [superviseur_v0.1.0-alpha.10_aarch64-apple-darwin.tar.gz](https://github.com/tsirysndr/superviseur/releases/download/v0.1.0-alpha.10/superviseur_v0.1.0-alpha.10_aarch64-apple-darwin.tar.gz) intel: [superviseur_v0.1.0-alpha.10_x86_64-apple-darwin.tar.gz](https://github.com/tsirysndr/superviseur/releases/download/v0.1.0-alpha.10/superviseur_v0.1.0-alpha.10_x86_64-apple-darwin.tar.gz)
-- `Linux`: [superviseur_v0.1.0-alpha.10_x86_64-unknown-linux-gnu.tar.gz](https://github.com/tsirysndr/superviseur/releases/download/v0.1.0-alpha.10/superviseur_v0.1.0-alpha.10_x86_64-unknown-linux-gnu.tar.gz)
+- `Mac`: arm64: [superviseur_v0.1.0-alpha.11_aarch64-apple-darwin.tar.gz](https://github.com/tsirysndr/superviseur/releases/download/v0.1.0-alpha.11/superviseur_v0.1.0-alpha.11_aarch64-apple-darwin.tar.gz) intel: [superviseur_v0.1.0-alpha.11_x86_64-apple-darwin.tar.gz](https://github.com/tsirysndr/superviseur/releases/download/v0.1.0-alpha.11/superviseur_v0.1.0-alpha.11_x86_64-apple-darwin.tar.gz)
+- `Linux`: [superviseur_v0.1.0-alpha.11_x86_64-unknown-linux-gnu.tar.gz](https://github.com/tsirysndr/superviseur/releases/download/v0.1.0-alpha.11/superviseur_v0.1.0-alpha.11_x86_64-unknown-linux-gnu.tar.gz)
 
 ## 🚀 Usage
 
@@ -192,7 +192,7 @@ You can use the [setup-superviseur](https://github.com/marketplace/actions/setup
 ```yaml
 - uses: tsirysndr/setup-superviseur@v1
   with:
-    version: 'v0.1.0-alpha.10'
+    version: 'v0.1.0-alpha.11'
 - run: superviseur --help
 ```
 
